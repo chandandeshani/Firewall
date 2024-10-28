@@ -2,52 +2,51 @@ import os
 from netfilterqueue import NetfilterQueue
 from scapy.all import *
 
-# Function to load rules from rules.txt
+
 def load_rules():
     allowed_incoming = {}
     blocked_outgoing = {}
     block_all_incoming = False
 
-    # Open the rules.txt file and parse the rules
+
     with open('rules.txt', 'r') as f:
         for line in f:
-            # Skip comments or empty lines
+
             line = line.strip()
             if line.startswith('#') or not line:
                 continue
             
-            # Split the rule into parts
+
             parts = line.split()
 
-            # Ensure the rule has the expected format
+
             if len(parts) == 4:
                 action, direction, protocol, port = parts[0], parts[1], parts[2], int(parts[3])
                 
-                # Handle incoming allow/block rules
+
                 if direction == "IN":
                     if action == "ALLOW_IN":
                         allowed_incoming[(protocol, port)] = True
                     elif action == "BLOCK_IN":
                         allowed_incoming[(protocol, port)] = False
-                # Handle outgoing block rules
+
                 elif direction == "OUT":
                     if action == "BLOCK_OUT":
                         blocked_outgoing[(protocol, port)] = True
 
-            # Handle blocking all incoming traffic
+
             elif len(parts) == 1 and parts[0] == "BLOCK_ALL_INCOMING":
                 block_all_incoming = True
 
     return allowed_incoming, blocked_outgoing, block_all_incoming
 
-# Packet handling function using NetfilterQueue
-def packet_callback(packet, allowed_incoming, blocked_outgoing, block_all_incoming):
-    scapy_packet = IP(packet.get_payload())  # Convert NetfilterQueue packet to scapy packet
 
+def packet_callback(packet, allowed_incoming, blocked_outgoing, block_all_incoming):
+    scapy_packet = IP(packet.get_payload())  
     if scapy_packet.haslayer(IP):
         ip_layer = scapy_packet.getlayer(IP)
 
-        # Check for TCP or UDP protocol
+
         if scapy_packet.haslayer(TCP):
             proto = 'TCP'
             tcp_udp_layer = scapy_packet.getlayer(TCP)
