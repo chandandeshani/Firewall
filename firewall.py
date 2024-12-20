@@ -1,153 +1,144 @@
 import os
-from netfilterqueue import NetfilterQueue
-from scapy.all import *
+import subprocess
+import time
+from collections import defaultdict
+from threading import Thread, Lock
+import logging
+import ipaddress  
+import requests 
+
+class AdvancedFirewall:
+    GOOGLE_SAFE_BROWSING_API_KEY = "your_google_api_key"  
+
+    def __init__(self):
+        self.blacklist = set()
+        self.whitelist = set()
+        self.rate_limit = defaultdict(list)  
+        self.rate_limit_threshold = 100  
+        self.port_scan_threshold = 10  
+        self.port_access_log = defaultdict(set)
+        self.lock = Lock()
+
+        # Initialize logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.FileHandler("firewall.log"),
+                logging.StreamHandler()
+            ]
+        )
+
+    def execute_iptables_command(self, command):
+        try:
+            subprocess.run(command, shell=True, check=True)
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Error executing iptables command: {e}")
+
+    def add_to_blacklist(self, ip):
+        with self.lock:
+            if ip not in self.blacklist:
+                self.blacklist.add(ip)
+                command = f"iptables -A INPUT -s {ip} -j DROP"
+                self.execute_iptables_command(command)
+                logging.info(f"Added {ip} to blacklist.")
+
+    def remove_from_blacklist(self, ip):
+        with self.lock:
+            if ip in self.blacklist:
+                self.blacklist.remove(ip)
+                command = f"iptables -D INPUT -s {ip} -j DROP"
+                self.execute_iptables_command(command)
+                logging.info(f"Removed {ip} from blacklist.")
+
+    def add_to_whitelist(self, ip):
+        with self.lock:
+            if ipaddress.ip_address(ip): 
+                self.whitelist.add(ip)
+                logging.info(f"Added {ip} to whitelist.")
+
+    def log_access(self, ip, port):
+        timestamp = time.time()
+        with self.lock:
+
+            self.rate_limit[ip].append(timestamp)
+            self.rate_limit[ip] = [t for t in self.rate_limit[ip] if timestamp - t < 60]
 
 
-def load_rules():
-    allowed_incoming = {}
-    blocked_outgoing = {}
-    block_all_incoming = False
+            self.port_access_log[ip].add(port)
+
+            if len(self.rate_limit[ip]) > self.rate_limit_threshold:
+                logging.warning(f"Rate limit exceeded for {ip}. Adding to blacklist.")
+                self.add_to_blacklist(ip)
+
+            if len(self.port_access_log[ip]) > self.port_scan_threshold:
+                logging.warning(f"Port scan detected from {ip}. Adding to blacklist.")
+                self.add_to_blacklist(ip)
+
+    def monitor_traffic(self):
+        def parse_logs():
+            while True:
+                time.sleep(1)
+
+                test_ip = "192.168.1.100"
+                test_port = 8080
+                self.log_access(test_ip, test_port)
+
+        Thread(target=parse_logs, daemon=True).start()
+
+    def manage_traffic_priority(self):
+        high_priority_ips = ["192.168.1.10"]
+        for ip in high_priority_ips:
+            if ipaddress.ip_address(ip): 
+                command = f"iptables -A INPUT -s {ip} -j ACCEPT"
+                self.execute_iptables_command(command)
+                logging.info(f"Prioritized traffic for {ip}.")
+
+    def update_rules(self):
+        while True:
+            time.sleep(30)
+            logging.info("Updating rules dynamically.")
 
 
-    with open('rules.txt', 'r') as f:
-        for line in f:
+    def check_url_safety(self, url):
+        try:
+            api_url = f"https://safebrowsing.googleapis.com/v4/threatMatches:find?key={self.GOOGLE_SAFE_BROWSING_API_KEY}"
+            payload = {
+                "client": {
+                    "clientId": "your_client_id",
+                    "clientVersion": "1.0"
+                },
+                "threatInfo": {
+                    "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING"],
+                    "platformTypes": ["ANY_PLATFORM"],
+                    "threatEntryTypes": ["URL"],
+                    "threatEntries": [
+                        {"url": url}
+                    ]
+                }
+            }
+            response = requests.post(api_url, json=payload)
+            if response.status_code == 200 and response.json().get("matches"):
+                logging.warning(f"Unsafe URL detected: {url}")
+                return False
+            logging.info(f"URL is safe: {url}")
+            return True
+        except Exception as e:
+            logging.error(f"Error checking URL safety: {e}")
+            return False
 
-            line = line.strip()
-            if line.startswith('#') or not line:
-                continue
-            
-
-            parts = line.split()
-
-
-            if len(parts) == 4:
-                action, direction, protocol, port = parts[0], parts[1], parts[2], int(parts[3])
-                
-
-                if direction == "IN":
-                    if action == "ALLOW_IN":
-                        allowed_incoming[(protocol, port)] = True
-                    elif action == "BLOCK_IN":
-                        allowed_incoming[(protocol, port)] = False
-
-                elif direction == "OUT":
-                    if action == "BLOCK_OUT":
-                        blocked_outgoing[(protocol, port)] = True
-
-
-            elif len(parts) == 1 and parts[0] == "BLOCK_ALL_INCOMING":
-                block_all_incoming = True
-
-    return allowed_incoming, blocked_outgoing, block_all_incoming
-
-
-def packet_callback(packet, allowed_incoming, blocked_outgoing, block_all_incoming):
-    scapy_packet = IP(packet.get_payload())  
-    if scapy_packet.haslayer(IP):
-        ip_layer = scapy_packet.getlayer(IP)
-
-
-        if scapy_packet.haslayer(TCP):
-            proto = 'TCP'
-            tcp_udp_layer = scapy_packet.getlayer(TCP)
-        elif scapy_packet.haslayer(UDP):
-            proto = 'UDP'
-            tcp_udp_layer = scapy_packet.getlayer(UDP)
-        else:
-            packet.accept()  # Accept non-TCP/UDP packets by default
-            return
-
-        port = tcp_udp_layer.dport if ip_layer.dst == get_if_addr(conf.iface) else tcp_udp_layer.sport
-        direction = "Incoming" if ip_layer.dst == get_if_addr(conf.iface) else "Outgoing"
-
-        # Handle incoming traffic
-        if direction == "Incoming":
-            if block_all_incoming and (proto, port) not in allowed_incoming:
-                print(f"Blocking incoming {proto} packet on port {port}")
-                packet.drop()  # Drop packet
-                return
-            elif allowed_incoming.get((proto, port), False):
-                print(f"Allowing incoming {proto} packet on port {port}")
-                packet.accept()  # Accept packet
-                return
-
-        # Handle outgoing traffic
-        if direction == "Outgoing" and blocked_outgoing.get((proto, port), False):
-            print(f"Blocking outgoing {proto} packet on port {port}")
-            packet.drop()  # Drop packet
-            return
-
-        # Default: Block if no rule matches
-        print(f"Blocking {proto} packet on port {port}")
-        packet.drop()  # Drop packet
-    else:
-        packet.accept()  # Accept non-IP packets
-
-# Main function to start the firewall
-def start_firewall():
-    allowed_incoming, blocked_outgoing, block_all_incoming = load_rules()
-
-    print("Firewall started. Monitoring traffic...")
-
-    # Set up NetfilterQueue
-    nfqueue = NetfilterQueue()
-    nfqueue.bind(1, lambda p: packet_callback(p, allowed_incoming, blocked_outgoing, block_all_incoming))
-
-    try:
-        # Run the queue
-        nfqueue.run()
-    except KeyboardInterrupt:
-        print("Stopping firewall")
-    finally:
-        nfqueue.unbind()
+    def start(self):
+        logging.info("Starting Advanced Firewall...")
+        self.monitor_traffic()
+        self.manage_traffic_priority()
+        Thread(target=self.update_rules, daemon=True).start()
 
 if __name__ == "__main__":
-    # Set iptables rules to redirect traffic to NFQUEUE
-    os.system("sudo iptables -I INPUT -j NFQUEUE --queue-num 1")
-    os.system("sudo iptables -I OUTPUT -j NFQUEUE --queue-num 1")
+    firewall = AdvancedFirewall()
+    firewall.start()
 
-    start_firewall()
-
-    # Remove iptables rules when done
-    os.system("sudo iptables -D INPUT -j NFQUEUE --queue-num 1")
-    os.system("sudo iptables -D OUTPUT -j NFQUEUE --queue-num 1")
-
-
-
-
-
-#sudo apt-get install libnetfilter-queue-dev
-
-#pip3 install NetfilterQueue
-
-#sudo apt-get install libnfnetlink-dev libnetfilter-queue-dev
-
-#pip3 install NetfilterQueue
-
-#pip3 install git+https://github.com/kti/python-netfilterqueue
-
-#python3 -c "import netfilterqueue"
-
-#sudo apt-get install python3-dev libnetfilter-queue-dev
-
-#sudo apt-get install build-essential
-
-#pip3 install git+https://github.com/kti/python-netfilterqueue.git
-
-#python3 -c "import netfilterqueue"
-
-#pip3 list | grep NetfilterQueue
-
-#python3 -m pip install git+https://github.com/kti/python-netfilterqueue.git
-
-#sudo pip3 install git+https://github.com/kti/python-netfilterqueue.git
-
-#sudo chmod -R 755 $(python3 -m site --user-site)
-
-#python3 -m venv firewall_env
-
-#source firewall_env/bin/activate
-
-#pip install git+https://github.com/kti/python-netfilterqueue.git
-
-#sudo python3 firewall.py
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logging.info("Stopping firewall...")
